@@ -1,0 +1,14 @@
+
+install/
+
+.idea/
+
+__pycache__/
+
+example_scenarios/output/
+
+tests/outputs/
+
+**/output_lanechange.txt
+
+tutorials/.ipynb_checkpoints/
