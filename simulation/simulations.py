@@ -327,7 +327,7 @@ def check_trajectories(solution: Solution, pps: PlanningProblemSet, config: Defa
 def create_video_for_simulation(scenario_with_planner: Scenario, output_folder_path: str,
                                 planning_problem_set: PlanningProblemSet,
                                 ego_vehicles: Optional[Dict[int, EgoVehicle]],
-                                suffix: str, follow_ego: bool = True):
+                                suffix: str, follow_ego: bool = False):
     """Creates the mp4 animation for the simulation result."""
     if not output_folder_path:
         print("Output folder not specified, skipping mp4 generation.")

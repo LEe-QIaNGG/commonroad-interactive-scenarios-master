@@ -18,13 +18,15 @@ __version__ = "0.1"
 import os
 import pickle
 import shutil
-from typing import Optional
+from collections import defaultdict, deque
+from typing import Optional, Dict, List
 from pathlib import Path
 
 from commonroad.common.file_reader import CommonRoadFileReader
 from commonroad.common.solution import CommonRoadSolutionReader
 from sumocr.sumo_config.default import DefaultConfig
 from commonroad_sumo.cr2sumo import CR2SumoMapConverter, CR2SumoMapConverterConfig
+from commonroad_sumo.sumolib.net import Edge
 
 import xml.etree.ElementTree as ET
 
@@ -67,6 +69,9 @@ def generate_sumo_files_from_commonroad(
         if scenario_name.endswith('.cr'):
             scenario_name = scenario_name[:-3]
 
+    if converter_config is None:
+        converter_config = CR2SumoMapConverterConfig.from_scenario(scenario)
+        converter_config.highway_mode = False
     converter = CR2SumoMapConverter(scenario, converter_config)
 
     # 调用 create_sumo_files() 生成SUMO文件
@@ -245,6 +250,11 @@ def _generate_routes_from_solution(
     lanelet_network = scenario.lanelet_network
     route_entries = []
 
+    # 确保 converter 已经完成转换，new_edges 已生成
+    if not hasattr(converter, "new_edges") or not converter.new_edges:
+        print("  警告: 转换器尚未完成转换，无法生成 solution 路由文件")
+        return None
+    
     for idx, planning_problem_solution in enumerate(solution.planning_problem_solutions):
         trajectory = planning_problem_solution.trajectory
         edges = _edge_sequence_from_states(
@@ -253,14 +263,26 @@ def _generate_routes_from_solution(
             converter,
         )
         if not edges:
+            print(f"  警告: Planning problem {idx} 的轨迹无法映射到有效的 SUMO edge，跳过")
             continue
+        
+        # 验证 route 至少包含 2 个 edge（起点和终点）
+        if len(edges) < 2:
+            print(f"  警告: Planning problem {idx} 的 route 太短（只有 {len(edges)} 个 edge），跳过")
+            continue
+            
         depart_time = getattr(trajectory.state_list[0], "time_step", 0) if trajectory.state_list else 0
         planning_problem_id = planning_problem_solution.planning_problem_id
+        is_ego = False
+        if planning_problem_set is not None and planning_problem_id is not None:
+            is_ego = planning_problem_id in planning_problem_set.planning_problem_dict
+
         route_entries.append(
             {
                 "planning_problem_id": planning_problem_id if planning_problem_id is not None else idx,
                 "depart_time": depart_time,
                 "edges": edges,
+                "is_ego": is_ego,
             }
         )
 
@@ -273,12 +295,16 @@ def _generate_routes_from_solution(
         f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
         f.write('<routes xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/routes_file.xsd">\n')
         f.write('    <vType id="solution_ego" accel="2.5" decel="7.5" length="4.5" maxSpeed="35" guiShape="passenger"/>\n')
+        f.write('    <vType id="solution_vehicle" accel="2.5" decel="7.5" length="4.5" maxSpeed="35" guiShape="passenger"/>\n')
 
         for entry in route_entries:
-            vehicle_id = f"solution_pp_{entry['planning_problem_id']}"
+            is_ego = entry.get("is_ego", False)
+            vehicle_prefix = "egoVehicle" if is_ego else "vehicle"
+            vehicle_type = "solution_ego" if is_ego else "solution_vehicle"
+            vehicle_id = f"{vehicle_prefix}_{entry['planning_problem_id']}"
             edges_str = " ".join(entry["edges"])
             depart = entry["depart_time"]
-            f.write(f'    <vehicle id="{vehicle_id}" type="solution_ego" depart="{depart}" departLane="free" departPos="random">\n')
+            f.write(f'    <vehicle id="{vehicle_id}" type="{vehicle_type}" depart="{depart}" departLane="free" departPos="random">\n')
             f.write(f'        <route edges="{edges_str}"/>\n')
             f.write("    </vehicle>\n")
 
@@ -289,7 +315,15 @@ def _generate_routes_from_solution(
 
 
 def _edge_sequence_from_states(state_list, lanelet_network, converter: CR2SumoMapConverter):
+    """
+    从状态序列生成 edge 序列，只使用最终 SUMO 网络中存在的 edge
+    
+    注意：转换过程中某些 edge 可能被合并或删除，所以必须检查 edge 是否在 new_edges 中
+    """
     edges = []
+    # 获取最终网络中的 edge（转换后保留的 edge）
+    new_edges = getattr(converter, "new_edges", {})
+    
     for state in state_list:
         position = getattr(state, "position", None)
         if position is None:
@@ -302,20 +336,29 @@ def _edge_sequence_from_states(state_list, lanelet_network, converter: CR2SumoMa
         edge_name = None
         for lanelet_id in lanelet_ids:
             edge_id = converter.lanelet_id2edge_id.get(lanelet_id)
-            if edge_id is not None:
-                edge_obj = converter.edges.get(edge_id)
-                if edge_obj is not None and getattr(edge_obj, "id", None):
-                    edge_name = str(edge_obj.id)
-                else:
-                    edge_name = str(edge_id)
-                break
+            if edge_id is None:
+                continue
+                
+            # 检查 edge 是否存在于最终网络中
+            if edge_id not in new_edges:
+                # 这个 edge 在转换过程中被删除了，跳过
+                continue
+                
+            edge_obj = new_edges[edge_id]
+            if edge_obj is not None and hasattr(edge_obj, "id"):
+                edge_name = str(edge_obj.id)
+            else:
+                edge_name = str(edge_id)
+            break
 
         if edge_name is None:
             continue
 
+        # 避免重复添加相同的 edge
         if not edges or edges[-1] != edge_name:
             edges.append(edge_name)
 
+    edges = _repair_edge_sequence_for_connectivity(edges, converter)
     return edges
 
 
@@ -361,47 +404,136 @@ def create_sumo_config_file(
         f.write(config_content)
 
 
+def _repair_edge_sequence_for_connectivity(
+        edge_list: List[str], converter: CR2SumoMapConverter
+) -> List[str]:
+    if len(edge_list) <= 1:
+        return edge_list
+
+    edge_lookup: Dict[str, Edge] = {}
+    for raw_id, edge in converter.new_edges.items():
+        identifier = str(getattr(edge, "id", raw_id))
+        edge_lookup[identifier] = edge
+
+    node_to_edges: Dict[int, List[str]] = defaultdict(list)
+    for key, edge in edge_lookup.items():
+        if edge.from_node is not None:
+            node_to_edges[edge.from_node.id].append(key)
+
+    successors: Dict[str, List[str]] = {}
+    for key, edge in edge_lookup.items():
+        node_id = edge.to_node.id if edge.to_node is not None else None
+        successors[key] = node_to_edges.get(node_id, []) if node_id is not None else []
+
+    def edges_connected(a: str, b: str) -> bool:
+        ea = edge_lookup.get(a)
+        eb = edge_lookup.get(b)
+        if ea is None or eb is None:
+            return False
+        if ea.to_node is None or eb.from_node is None:
+            return False
+        return ea.to_node.id == eb.from_node.id
+
+    def shortest_path(start: str, goal: str) -> Optional[List[str]]:
+        if start not in successors or goal not in edge_lookup:
+            return None
+        queue = deque([(start, [start])])
+        visited = {start}
+        while queue:
+            current, path = queue.popleft()
+            for nxt in successors.get(current, []):
+                if nxt == goal:
+                    return path + [nxt]
+                if nxt not in visited:
+                    visited.add(nxt)
+                    queue.append((nxt, path + [nxt]))
+        return None
+
+    repaired: List[str] = [edge_list[0]]
+    for next_edge in edge_list[1:]:
+        last_edge = repaired[-1]
+        if edges_connected(last_edge, next_edge):
+            repaired.append(next_edge)
+            continue
+        bridging_path = shortest_path(last_edge, next_edge)
+        if not bridging_path:
+            return []
+        repaired.extend(bridging_path[1:])
+
+    return repaired
+
+
 if __name__ == "__main__":
     import argparse
+    from pathlib import Path
+
+    def _default_paths_from_name(scenario_name: str):
+        repo_root = Path(__file__).resolve().parents[1]
+        scenario_folder = repo_root / "interactive_scenarios" / scenario_name
+        commonroad_file = scenario_folder / f"{scenario_name}.cr.xml"
+        solution_file = scenario_folder / f"{scenario_name}_solution.xml"
+        return commonroad_file, scenario_folder, solution_file
 
     parser = argparse.ArgumentParser(
         description="从CommonRoad场景生成SUMO仿真配置文件"
     )
     parser.add_argument(
-        "commonroad_file",
+        "--commonroad_file",
         type=str,
         help="CommonRoad场景文件路径 (.cr.xml)"
     )
     parser.add_argument(
-        "output_folder",
+        "--output_folder",
         type=str,
         help="输出文件夹路径"
     )
     parser.add_argument(
-        "--scenario-name",
+        "--scenario_name",
         type=str,
         default=None,
         help="场景名称（默认从文件名提取）"
     )
     parser.add_argument(
-        "--simulation-steps",
+        "--simulation_steps",
         type=int,
         default=500,
         help="仿真步数（默认500）"
     )
     parser.add_argument(
-        "--step-length",
+        "--step_length",
         type=float,
         default=0.1,
         help="每步时间长度（秒，默认0.1）"
     )
+    parser.add_argument(
+        "--solution_file",
+        type=str,
+        default=None,
+        help="解决方案文件路径 (.solution.xml)"
+    )
     args = parser.parse_args()
 
+    commonroad_file = args.commonroad_file
+    output_folder = args.output_folder
+    solution_file = args.solution_file
+
+    if args.scenario_name and (not commonroad_file or not output_folder or not solution_file):
+        default_cr, default_folder, default_solution = _default_paths_from_name(args.scenario_name)
+        commonroad_file = commonroad_file or str(default_cr)
+        output_folder = output_folder or str(default_folder)
+        solution_file = solution_file or (str(default_solution) if default_solution.exists() else None)
+
+    if not commonroad_file:
+        raise ValueError("必须提供 --commonroad_file，或通过 --scenario_name 推断。")
+    if not output_folder:
+        raise ValueError("必须提供 --output_folder，或通过 --scenario_name 推断。")
+
     generate_sumo_files_from_commonroad(
-        args.commonroad_file,
-        args.output_folder,
+        commonroad_file,
+        output_folder,
         args.scenario_name,
         args.simulation_steps,
         args.step_length,
+        solution_file=solution_file,
     )
 

@@ -10,19 +10,20 @@ from commonroad.scenario.scenario import Tag
 path = os.path.abspath("")
 
 # specify required arguments
-name_scenario = "CHN_TST-2_1_T-23"
+name_scenario = "CHN_TST-2_1_T-440"
 
 # replace with local folder path (in this case we cloned the whole repository from https://gitlab.lrz.de/tum-cps/commonroad-scenarios/-/tree/2020a_scenarios):
 folder_scenarios = os.path.join(path, "./interactive_scenarios/")
 path_scenario = os.path.join(folder_scenarios, name_scenario)
 # path where solutions are stored
-path_solutions = os.path.join(path, "./outputs/solutions")
+path_solutions = os.path.join(path, f"./outputs/solutions/{name_scenario}")
 
 # path to store output video
-path_video = os.path.join(path, "./outputs/videos")
+path_video = os.path.join(path, f"./outputs/videos/{name_scenario}")
+os.makedirs(path_video, exist_ok=True)
 
 # path to store simulated scenarios
-path_scenarios_simulated = os.path.join(path, "../outputs/simulated_scenarios")
+path_scenarios_simulated = os.path.join(path, f"./outputs/simulated_scenarios/{name_scenario}")
 
 
 vehicle_type = VehicleType.FORD_ESCORT
@@ -30,18 +31,19 @@ vehicle_model = VehicleModel.KS
 cost_function = CostFunction.TR1
 
 # run simulation, a video animation of the simulation is stored in the end
-scenario_without_ego, pps = simulate_without_ego(interactive_scenario_path=path_scenario,
-                                                 output_folder_path=path_video,
-                                                 create_video=False)
+# scenario_without_ego, pps = simulate_without_ego(interactive_scenario_path=path_scenario,
+#                                                  output_folder_path=path_video,
+#                                                  create_video=True)
 # # write simulated scenario to CommonRoad xml file
 # fw = CommonRoadFileWriter(scenario_without_ego, pps, author, affiliation, source, tags)
 # fw.write_to_file(os.path.join(path_scenarios_simulated, name_scenario + "_no_ego.xml"), OverwriteExistingFile.ALWAYS)
 # visualize_scenario_with_trajectory(scenario_without_ego, pps)
 
 
-# scenario_with_planner, pps, ego_vehicles_planner = simulate_with_planner(interactive_scenario_path=path_scenario,
-#                                                                          output_folder_path=path_video,
-#                                                                          create_video=True)
+scenario_with_planner, pps, ego_vehicles_planner = simulate_with_planner(interactive_scenario_path=path_scenario,
+                                                                         output_folder_path=path_video,
+                                                                         create_video=True)
+
 # # write simulated scenario to CommonRoad xml file
 # if scenario_with_planner:
 #     # write simulated scenario to file

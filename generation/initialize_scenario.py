@@ -1,8 +1,9 @@
 import argparse
 import os
 import re
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
+import numpy as np
 from commonroad.common.file_reader import CommonRoadFileReader
 from commonroad.common.file_writer import CommonRoadFileWriter, OverwriteExistingFile
 from commonroad.common.solution import (
@@ -17,11 +18,8 @@ from commonroad.planning.planning_problem import PlanningProblem, PlanningProble
 from commonroad.scenario.state import KSState
 from commonroad.scenario.trajectory import Trajectory
 from commonroad_velocity_planner.global_trajectory import GlobalTrajectory
-from commonroad_velocity_planner.velocity_planner_interface import ImplementedPlanners
 
-from commonroad_global_planner.global_planner import GlobalPlanner
-from planning_problem import generate_random_planning_problems
-import numpy as np
+from planning_problem import generate_validated_planning_problems
 
 
 def parse_args() -> argparse.Namespace:
@@ -40,6 +38,18 @@ def parse_args() -> argparse.Namespace:
         help="随机种子（会同时影响输出文件命名）",
     )
     parser.add_argument(
+        "--num-vehicle",
+        type=int,
+        default=1,
+        help="需要生成轨迹的规划问题数量",
+    )
+    parser.add_argument(
+        "--num-ego",
+        type=int,
+        default=1,
+        help="写入 cr.xml 并作为 ego vehicle 使用的规划问题数量",
+    )
+    parser.add_argument(
         "--output-dir",
         default=None,
         help="输出目录（默认写入输入文件目录下的 scenario-{seed} 子目录）",
@@ -56,29 +66,6 @@ def parse_args() -> argparse.Namespace:
         help="若目标文件存在，是否直接覆盖",
     )
     return parser.parse_args()
-
-
-def plan_trajectory(
-    scenario, planning_problem: PlanningProblem
-) -> Optional[GlobalTrajectory]:
-    global_planner: GlobalPlanner = GlobalPlanner(
-        scenario=scenario,
-        planning_problem=planning_problem,
-    )
-    candidate_trajectory: GlobalTrajectory = global_planner.plan_global_trajectory(
-        use_regulatory_stop_elements=True,
-        regulatory_elements_time_step=0,
-        retrieve_shortest=True,
-        consider_least_lance_changes=True,
-        velocity_planner=ImplementedPlanners.BangBangSTPlanner,
-    )
-    if (
-        candidate_trajectory is not None
-        and hasattr(candidate_trajectory, "reference_path")
-        and len(candidate_trajectory.reference_path) > 2
-    ):
-        return candidate_trajectory
-    return None
 
 
 def _replace_suffix_with_seed(name: str, seed: Optional[int]) -> str:
@@ -171,15 +158,17 @@ def convert_to_commonroad_trajectory(
 
 def write_solution_file(
     scenario,
-    planning_problem: PlanningProblem,
-    global_trajectory: GlobalTrajectory,
+    planning_problem_trajectories: List[Tuple[PlanningProblem, Trajectory]],
     output_path: str,
     overwrite: bool,
 ) -> None:
-    trajectory = convert_to_commonroad_trajectory(planning_problem, global_trajectory)
-    solution = Solution(
-        scenario_id=scenario.scenario_id,
-        planning_problem_solutions=[
+    if not planning_problem_trajectories:
+        print("未生成轨迹，跳过 Solution 文件写入。")
+        return
+
+    solution_entries = []
+    for planning_problem, trajectory in planning_problem_trajectories:
+        solution_entries.append(
             PlanningProblemSolution(
                 planning_problem_id=planning_problem.planning_problem_id,
                 vehicle_type=VehicleType.BMW_320i,
@@ -187,7 +176,11 @@ def write_solution_file(
                 cost_function=CostFunction.JB1,
                 trajectory=trajectory,
             )
-        ],
+        )
+
+    solution = Solution(
+        scenario_id=scenario.scenario_id,
+        planning_problem_solutions=solution_entries,
     )
     writer = CommonRoadSolutionWriter(solution)
     solution_dir = os.path.dirname(output_path) or "."
@@ -209,63 +202,58 @@ def build_solution_output_path(
     return f"{base}_solution.xml"
 
 
-def find_feasible_planning_problem(
-    scenario,
-    base_seed: Optional[int],
-    max_attempts: int,
-) -> Tuple[PlanningProblemSet, PlanningProblem, GlobalTrajectory]:
-    for attempt in range(max_attempts):
-        attempt_seed = base_seed + attempt if base_seed is not None else None
-        planning_problem_set = generate_random_planning_problems(
-            scenario, num_problems=1, random_seed=attempt_seed
-        )
-        if len(planning_problem_set.planning_problem_dict) == 0:
-            print(f"第 {attempt + 1} 次尝试：未生成有效的 PlanningProblem，继续。")
-            continue
-        planning_problem = next(
-            iter(planning_problem_set.planning_problem_dict.values())
-        )
-        try:
-            trajectory = plan_trajectory(scenario, planning_problem)
-            if trajectory is not None:
-                print(
-                    f"第 {attempt + 1} 次尝试成功，生成的 PlanningProblem 可规划，轨迹长度 {len(trajectory.reference_path)}"
-                )
-                return planning_problem_set, planning_problem, trajectory
-            print(f"第 {attempt + 1} 次尝试规划失败，继续。")
-        except Exception as exc:
-            print(f"第 {attempt + 1} 次尝试规划异常：{exc}，继续。")
-
-    raise RuntimeError(
-        f"在 {max_attempts} 次尝试内未能得到可规划的规划问题，请调整参数或场景后重试。"
-    )
-
-
 def main():
     args = parse_args()
     input_path = os.path.abspath(args.input)
     if not os.path.isfile(input_path):
         raise FileNotFoundError(f"找不到输入文件: {input_path}")
 
+    if args.num_ego <= 0:
+        raise ValueError("--num-ego 必须大于 0")
+    if args.num_vehicle < args.num_ego:
+        raise ValueError("--num-vehicle 不能小于 --num-ego")
+
     scenario, _ = CommonRoadFileReader(input_path).open()
-    (
-        planning_problem_set,
-        planning_problem,
-        trajectory,
-    ) = find_feasible_planning_problem(scenario, args.seed, args.max_attempts)
+    planning_problem_set, planning_problem_solutions = generate_validated_planning_problems(
+        scenario,
+        num_vehicle=args.num_vehicle,
+        num_additional=0,
+        random_seed=args.seed,
+        max_attempts=args.max_attempts,
+    )
 
     output_path = build_output_path(input_path, args.seed, args.output_dir)
-    write_planning_problems(scenario, planning_problem_set, output_path, args.overwrite)
+
+    planning_problem_trajectories: List[Tuple[PlanningProblem, Trajectory]] = []
+    for planning_problem, global_trajectory in planning_problem_solutions:
+        trajectory = convert_to_commonroad_trajectory(
+            planning_problem, global_trajectory
+        )
+        planning_problem_trajectories.append((planning_problem, trajectory))
+
+    sorted_trajectories = sorted(
+        planning_problem_trajectories, key=lambda item: item[0].planning_problem_id
+    )
+    ego_trajectories = sorted_trajectories[: args.num_ego]
+
+    planning_problem_set_to_write = PlanningProblemSet()
+    for planning_problem, _ in ego_trajectories:
+        planning_problem_set_to_write.add_planning_problem(planning_problem)
+
+    write_planning_problems(
+        scenario,
+        planning_problem_set_to_write,
+        output_path,
+        args.overwrite,
+    )
 
     solution_output_path = build_solution_output_path(output_path)
     write_solution_file(
         scenario,
-        planning_problem,
-        trajectory,
+        sorted_trajectories,
         solution_output_path,
         args.overwrite,
     )
-
 
 if __name__ == "__main__":
     main()

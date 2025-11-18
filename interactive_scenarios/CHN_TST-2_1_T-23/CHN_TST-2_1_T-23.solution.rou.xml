@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<routes xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/routes_file.xsd">
-    <vType id="solution_ego" accel="2.5" decel="7.5" length="4.5" maxSpeed="35" guiShape="passenger"/>
-    <vehicle id="solution_pp_0" type="solution_ego" depart="0" departLane="free" departPos="random">
-        <route edges="700 1681 716 1695 689 1675 486 1521 489 1523 356 1413 360 1416 553 1570 713"/>
-    </vehicle>
-</routes>
