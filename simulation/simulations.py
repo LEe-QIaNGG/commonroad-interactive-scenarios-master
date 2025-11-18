@@ -15,13 +15,16 @@ import os
 import pickle
 from enum import unique, Enum
 from math import sin, cos
-from typing import Tuple, Dict, Optional
+from typing import Tuple, Dict, Optional, List
 
 import numpy as np
 from commonroad.common.file_reader import CommonRoadFileReader
 from commonroad.common.solution import Solution
+from commonroad.prediction.prediction import TrajectoryPrediction
 from commonroad.planning.planning_problem import PlanningProblemSet
 from commonroad.scenario.scenario import Scenario
+from commonroad.scenario.state import CustomState, InitialState
+from commonroad.scenario.trajectory import Trajectory
 from sumocr.interface.ego_vehicle import EgoVehicle
 from sumocr.interface.sumo_simulation import SumoSimulation
 from sumocr.scenario.scenario_wrapper import ScenarioWrapper
@@ -334,6 +337,42 @@ def create_video_for_simulation(scenario_with_planner: Scenario, output_folder_p
     create_video(scenario_with_planner,
                  output_folder_path,
                  planning_problem_set=planning_problem_set,
-                 trajectory_pred=ego_vehicles,
+                 trajectory_pred=_ego_predictions_with_initial_state(ego_vehicles),
                  follow_ego=follow_ego,
                  suffix=suffix)
+
+
+class _TrajectoryPredictionList(list):
+    def values(self):
+        return self
+
+
+def _ego_predictions_with_initial_state(
+        ego_vehicles: Optional[Dict[int, EgoVehicle]]) -> Optional[_TrajectoryPredictionList]:
+    if not ego_vehicles:
+        return None
+
+    predictions: _TrajectoryPredictionList = _TrajectoryPredictionList()
+
+    for ego_vehicle in ego_vehicles.values():
+        prediction = ego_vehicle.driven_trajectory
+        trajectory = prediction.trajectory
+        state_list = []
+
+        for state in trajectory.state_list:
+            if isinstance(state, InitialState):
+                state_list.append(state)
+                continue
+
+            converted_state = InitialState()
+            state.convert_state_to_state(converted_state)
+            converted_state.time_step = state.time_step
+            state_list.append(converted_state)
+
+        converted_prediction = TrajectoryPrediction(
+            Trajectory(trajectory.initial_time_step, state_list),
+            prediction.shape,
+        )
+        predictions.append(converted_prediction)
+
+    return predictions

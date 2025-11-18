@@ -12,3 +12,5 @@ tests/outputs/
 **/output_lanechange.txt
 
 tutorials/.ipynb_checkpoints/
+
+test.py
