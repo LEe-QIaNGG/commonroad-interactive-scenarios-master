@@ -39,6 +39,7 @@ def generate_sumo_files_from_commonroad(
     step_length: float = 0.1,
     converter_config: Optional[CR2SumoMapConverterConfig] = None,
     solution_file: Optional[str] = None,
+    car_follow_model: str = "Krauss",
     **default_config_kwargs
 ) -> str:
     """
@@ -52,6 +53,7 @@ def generate_sumo_files_from_commonroad(
     :param simulation_steps: 仿真步数，默认500
     :param step_length: 每步时间长度（秒），默认0.1
     :param converter_config: CR2SumoMapConverterConfig 配置对象（可选）
+    :param car_follow_model: 跟驰模型名称，可选值：Krauss, IDM, IDMM, W99, PWagner2009, BKerner, Gipps, Linear, Newell 等，默认 "Krauss"
     :param default_config_kwargs: DefaultConfig的其他参数
     :return: 输出文件夹路径
     """
@@ -99,6 +101,7 @@ def generate_sumo_files_from_commonroad(
             planning_problem_set,
             output_folder,
             scenario_name,
+            car_follow_model=car_follow_model,
         )
         if generated_route:
             route_file_name = generated_route
@@ -156,13 +159,10 @@ def _update_sumo_config_file(
     route_file_name: str,
     step_length: float,
 ):
-    """更新SUMO配置文件以确保引用正确的网络和路由文件"""
-    try:
-        tree = ET.parse(sumo_cfg_path)
-        root = tree.getroot()
-    except Exception:
-        create_sumo_config_file(scenario_name, route_file_name, sumo_cfg_path, step_length)
-        return
+    """更新SUMO配置文件以确保引用正确的网络和路由文件，并添加必要的processing配置（包括collision设置）"""
+    tree = ET.parse(sumo_cfg_path)
+    root = tree.getroot()
+
 
     input_element = root.find("input")
     if input_element is None:
@@ -187,7 +187,72 @@ def _update_sumo_config_file(
         step_length_element = ET.SubElement(time_element, "step-length")
     step_length_element.set("value", str(step_length))
 
-    tree.write(sumo_cfg_path, encoding="utf-8", xml_declaration=True)
+    # 添加或更新 processing 部分，包括 collision 配置
+    processing_element = root.find("processing")
+    if processing_element is None:
+        processing_element = ET.SubElement(root, "processing")
+
+    # 设置 lateral-resolution
+    lateral_resolution = processing_element.find("lateral-resolution")
+    if lateral_resolution is None:
+        lateral_resolution = ET.SubElement(processing_element, "lateral-resolution")
+    lateral_resolution.set("value", "1.0")
+
+    # 设置 max-depart-delay
+    max_depart_delay = processing_element.find("max-depart-delay")
+    if max_depart_delay is None:
+        max_depart_delay = ET.SubElement(processing_element, "max-depart-delay")
+    max_depart_delay.set("value", "5")
+
+    # 设置 time-to-teleport
+    time_to_teleport = processing_element.find("time-to-teleport")
+    if time_to_teleport is None:
+        time_to_teleport = ET.SubElement(processing_element, "time-to-teleport")
+    time_to_teleport.set("value", "-1")
+
+    # 设置 collision.mingap-factor
+    collision_mingap = processing_element.find("collision.mingap-factor")
+    if collision_mingap is None:
+        collision_mingap = ET.SubElement(processing_element, "collision.mingap-factor")
+    collision_mingap.set("value", "1")
+
+    # 设置 collision.check-junctions
+    collision_check_junctions = processing_element.find("collision.check-junctions")
+    if collision_check_junctions is None:
+        collision_check_junctions = ET.SubElement(processing_element, "collision.check-junctions")
+    collision_check_junctions.set("value", "false")
+
+    # 设置 collision.action
+    collision_action = processing_element.find("collision.action")
+    if collision_action is None:
+        collision_action = ET.SubElement(processing_element, "collision.action")
+    collision_action.set("value", "warn")
+
+    # 添加 report 部分（如果不存在）
+    report_element = root.find("report")
+    if report_element is None:
+        report_element = ET.SubElement(root, "report")
+        verbose = ET.SubElement(report_element, "verbose")
+        verbose.set("value", "false")
+        no_step_log = ET.SubElement(report_element, "no-step-log")
+        no_step_log.set("value", "true")
+        no_warnings = ET.SubElement(report_element, "no-warnings")
+        no_warnings.set("value", "true")
+
+    # 格式化并写入 XML（使用 minidom 进行格式化）
+    try:
+        import xml.dom.minidom
+        xml_string = ET.tostring(root, encoding="utf-8")
+        dom = xml.dom.minidom.parseString(xml_string)
+        pretty_xml = dom.toprettyxml(indent="\t", encoding="utf-8")
+        # 移除 minidom 添加的额外空行
+        lines = [line for line in pretty_xml.decode("utf-8").split("\n") if line.strip()]
+        formatted_xml = "\n".join(lines)
+        with open(sumo_cfg_path, "w", encoding="utf-8") as f:
+            f.write(formatted_xml)
+    except Exception:
+        # 如果格式化失败，使用原始方式写入
+        tree.write(sumo_cfg_path, encoding="utf-8", xml_declaration=True)
 def _rename_converter_outputs(output_folder: Path, original_name: str, scenario_name: str):
     """将转换器生成的文件统一重命名前缀"""
     if not original_name or original_name == scenario_name:
@@ -239,6 +304,7 @@ def _generate_routes_from_solution(
     planning_problem_set,
     output_folder: Path,
     scenario_name: str,
+    car_follow_model: str = "Krauss",
 ) -> Optional[str]:
     """根据 CommonRoad solution 生成 SUMO 车辆路由文件"""
     try:
@@ -294,8 +360,8 @@ def _generate_routes_from_solution(
     with open(route_file_path, "w", encoding="utf-8") as f:
         f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
         f.write('<routes xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/routes_file.xsd">\n')
-        f.write('    <vType id="solution_ego" accel="2.5" decel="7.5" length="4.5" maxSpeed="35" guiShape="passenger"/>\n')
-        f.write('    <vType id="solution_vehicle" accel="2.5" decel="7.5" length="4.5" maxSpeed="35" guiShape="passenger"/>\n')
+        f.write(f'    <vType id="solution_ego" accel="2.5" decel="7.5" length="4.5" maxSpeed="35" guiShape="passenger" carFollowModel="{car_follow_model}"/>\n')
+        f.write(f'    <vType id="solution_vehicle" accel="2.5" decel="7.5" length="4.5" maxSpeed="35" guiShape="passenger" carFollowModel="{car_follow_model}"/>\n')
 
         for entry in route_entries:
             is_ego = entry.get("is_ego", False)
@@ -360,48 +426,6 @@ def _edge_sequence_from_states(state_list, lanelet_network, converter: CR2SumoMa
 
     edges = _repair_edge_sequence_for_connectivity(edges, converter)
     return edges
-
-
-def create_sumo_config_file(
-    scenario_name: str,
-    route_file_name: str,
-    output_path: str,
-    step_length: float = 0.1,
-) -> None:
-    """
-    创建SUMO配置文件 (.sumo.cfg)
-
-    :param scenario_name: 场景名称
-    :param output_path: 输出文件路径
-    :param step_length: 每步时间长度（秒）
-    """
-    config_content = f"""<?xml version="1.0" ?>
-<configuration xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/sumoConfiguration.xsd">
-	<input>
-		<net-file value="{scenario_name}.net.xml"/>
-		<route-files value="{route_file_name}"/>
-	</input>
-	<time>
-		<begin value="0"/>
-		<step-length value="{step_length}"/>
-	</time>
-	<report>
-		<verbose value="false"/>
-		<no-step-log value="true"/>
-		<no-warnings value="true"/>
-	</report>
-	<processing>
-		<lateral-resolution value="1.0"/>
-		<max-depart-delay value="5"/>
-		<time-to-teleport value="-1"/>
-		<collision.mingap-factor value="1"/>
-		<collision.check-junctions value="false"/>
-		<collision.action value="none"/>
-	</processing>
-</configuration>"""
-
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(config_content)
 
 
 def _repair_edge_sequence_for_connectivity(
@@ -511,6 +535,15 @@ if __name__ == "__main__":
         default=None,
         help="解决方案文件路径 (.solution.xml)"
     )
+    parser.add_argument(
+        "--car_follow_model",
+        type=str,
+        default="EIDM",
+        choices=["Krauss", "KraussOrig1", "KraussPS", "KraussAccident", "IDM", "IDMM", "IDMPlus", "IDMVanilla", 
+                 "W99", "PWagner2009", "PWagner", "BKerner", "SKraussCL", "Gipps", "Helly", "Linear", 
+                 "Newell", "FullVelocityDifference", "SmartSK", "ACC"],
+        help="跟驰模型名称（默认: Krauss）。可选: Krauss, IDM, IDMM, W99, PWagner2009, BKerner, Gipps, Linear, Newell 等"
+    )
     args = parser.parse_args()
 
     commonroad_file = args.commonroad_file
@@ -535,5 +568,6 @@ if __name__ == "__main__":
         args.simulation_steps,
         args.step_length,
         solution_file=solution_file,
+        car_follow_model=args.car_follow_model,
     )
 
