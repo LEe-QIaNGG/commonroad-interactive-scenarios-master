@@ -19,8 +19,15 @@ import os
 import pickle
 import shutil
 from collections import defaultdict, deque
-from typing import Optional, Dict, List
+from typing import Optional, Dict, List, Tuple
 from pathlib import Path
+import random
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+LOCAL_SUMOCR_DIR = REPO_ROOT / "sumocr"
+if LOCAL_SUMOCR_DIR.exists() and str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from commonroad.common.file_reader import CommonRoadFileReader
 from commonroad.common.solution import CommonRoadSolutionReader
@@ -40,6 +47,12 @@ def generate_sumo_files_from_commonroad(
     converter_config: Optional[CR2SumoMapConverterConfig] = None,
     solution_file: Optional[str] = None,
     car_follow_model: str = "Krauss",
+    num_random_pedestrians: int = 0,
+    pedestrian_speed: float = 1.3,
+    pedestrian_depart_interval: float = 2.0,
+    pedestrian_walk_min: int = 3,
+    pedestrian_walk_max: int = 6,
+    pedestrian_seed: Optional[int] = None,
     **default_config_kwargs
 ) -> str:
     """
@@ -55,6 +68,12 @@ def generate_sumo_files_from_commonroad(
     :param converter_config: CR2SumoMapConverterConfig 配置对象（可选）
     :param car_follow_model: 跟驰模型名称，可选值：Krauss, IDM, IDMM, W99, PWagner2009, BKerner, Gipps, Linear, Newell 等，默认 "Krauss"
     :param default_config_kwargs: DefaultConfig的其他参数
+    :param num_random_pedestrians: 从 solution 中分配为行人的数量，默认 0（不生成行人）
+    :param pedestrian_speed: 行人行走速度（m/s）
+    :param pedestrian_depart_interval: 行人出发时间间隔（秒，已废弃，保留用于兼容性）
+    :param pedestrian_walk_min: 随机游走的最短边数（已废弃，保留用于兼容性）
+    :param pedestrian_walk_max: 随机游走的最长边数（已废弃，保留用于兼容性）
+    :param pedestrian_seed: 随机种子（已废弃，保留用于兼容性）
     :return: 输出文件夹路径
     """
     # 确保输出文件夹存在
@@ -92,9 +111,10 @@ def generate_sumo_files_from_commonroad(
     )
     _rename_converter_outputs(output_folder, original_project_name, scenario_name)
 
-    route_file_name = None
-    if solution_file:
-        generated_route = _generate_routes_from_solution(
+    net_file_path = output_folder / f"{scenario_name}.net.xml"
+    _ensure_pedestrian_access_on_net(net_file_path)
+
+    generated_route = _generate_routes_from_solution(
             solution_file,
             scenario,
             converter,
@@ -102,12 +122,10 @@ def generate_sumo_files_from_commonroad(
             output_folder,
             scenario_name,
             car_follow_model=car_follow_model,
+            num_pedestrians=num_random_pedestrians,
+            pedestrian_speed=pedestrian_speed,
         )
-        if generated_route:
-            route_file_name = generated_route
-
-    if not route_file_name:
-        route_file_name = _find_existing_route_file(output_folder, scenario_name)
+    route_file_name = generated_route
 
     # 复制CommonRoad场景文件到输出文件夹
     output_cr_path = output_folder / f"{scenario_name}.cr.xml"
@@ -138,7 +156,6 @@ def generate_sumo_files_from_commonroad(
         pickle.dump(conf, f)
 
     print(f"✓ 成功生成配置文件到: {output_folder}")
-    print(f"  - {route_file_name}")
     return str(output_folder)
 
 
@@ -220,7 +237,7 @@ def _update_sumo_config_file(
     collision_check_junctions = processing_element.find("collision.check-junctions")
     if collision_check_junctions is None:
         collision_check_junctions = ET.SubElement(processing_element, "collision.check-junctions")
-    collision_check_junctions.set("value", "false")
+    collision_check_junctions.set("value", "True")
 
     # 设置 collision.action
     collision_action = processing_element.find("collision.action")
@@ -271,14 +288,6 @@ def _rename_converter_outputs(output_folder: Path, original_name: str, scenario_
         shutil.move(str(file_path), str(target_path))
 
 
-def _find_existing_route_file(output_folder: Path, scenario_name: str) -> str:
-    """查找默认生成的路由文件"""
-    candidates = sorted(output_folder.glob(f"{scenario_name}*.rou.xml"))
-    if candidates:
-        return candidates[0].name
-    return f"{scenario_name}.vehicle.rou.xml"
-
-
 def _remove_all_traffic_lights(lanelet_network):
     """移除场景中的所有交通灯，以避免转换时的错误"""
     try:
@@ -305,13 +314,20 @@ def _generate_routes_from_solution(
     output_folder: Path,
     scenario_name: str,
     car_follow_model: str = "Krauss",
+    num_pedestrians: int = 0,
+    pedestrian_speed: float = 1.3,
 ) -> Optional[str]:
-    """根据 CommonRoad solution 生成 SUMO 车辆路由文件"""
-    try:
-        solution = CommonRoadSolutionReader.open(solution_file)
-    except Exception as exc:
-        print(f"  警告: 无法读取 solution 文件 {solution_file}: {exc}")
+    """根据 CommonRoad solution 生成 SUMO 车辆和行人路由文件
+    
+    根据配置参数将 solution 中的对象分配为：
+    - 第一个为 ego vehicle
+    - 接下来 num_pedestrians 个为 pedestrian
+    - 剩下的为普通 vehicle
+    """
+    if solution_file is None:
         return None
+        
+    solution = CommonRoadSolutionReader.open(solution_file)
 
     lanelet_network = scenario.lanelet_network
     route_entries = []
@@ -321,6 +337,7 @@ def _generate_routes_from_solution(
         print("  警告: 转换器尚未完成转换，无法生成 solution 路由文件")
         return None
     
+    # 根据配置分配对象类型
     for idx, planning_problem_solution in enumerate(solution.planning_problem_solutions):
         trajectory = planning_problem_solution.trajectory
         edges = _edge_sequence_from_states(
@@ -331,24 +348,25 @@ def _generate_routes_from_solution(
         if not edges:
             print(f"  警告: Planning problem {idx} 的轨迹无法映射到有效的 SUMO edge，跳过")
             continue
-        
-        # 验证 route 至少包含 2 个 edge（起点和终点）
-        if len(edges) < 2:
-            print(f"  警告: Planning problem {idx} 的 route 太短（只有 {len(edges)} 个 edge），跳过")
-            continue
             
         depart_time = getattr(trajectory.state_list[0], "time_step", 0) if trajectory.state_list else 0
         planning_problem_id = planning_problem_solution.planning_problem_id
-        is_ego = False
-        if planning_problem_set is not None and planning_problem_id is not None:
-            is_ego = planning_problem_id in planning_problem_set.planning_problem_dict
+        
+        # 根据配置和索引确定对象类型
+        # 第一个为 ego vehicle，接下来 num_pedestrians 个为 pedestrian，剩下的为普通 vehicle
+        if idx == 0:
+            object_type = "ego"
+        elif 1 <= idx <= num_pedestrians:
+            object_type = "pedestrian"
+        else:
+            object_type = "vehicle"
 
         route_entries.append(
             {
                 "planning_problem_id": planning_problem_id if planning_problem_id is not None else idx,
                 "depart_time": depart_time,
                 "edges": edges,
-                "is_ego": is_ego,
+                "object_type": object_type,
             }
         )
 
@@ -360,24 +378,127 @@ def _generate_routes_from_solution(
     with open(route_file_path, "w", encoding="utf-8") as f:
         f.write('<?xml version="1.0" encoding="UTF-8"?>\n')
         f.write('<routes xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="http://sumo.dlr.de/xsd/routes_file.xsd">\n')
+        
+        # 定义车辆类型
         f.write(f'    <vType id="solution_ego" accel="2.5" decel="7.5" length="4.5" maxSpeed="35" guiShape="passenger" carFollowModel="{car_follow_model}"/>\n')
         f.write(f'    <vType id="solution_vehicle" accel="2.5" decel="7.5" length="4.5" maxSpeed="35" guiShape="passenger" carFollowModel="{car_follow_model}"/>\n')
+        
+        # 检查是否有行人需要定义类型
+        has_pedestrians = any(entry["object_type"] == "pedestrian" for entry in route_entries)
+        if has_pedestrians:
+            f.write(f'    <vType id="pedestrian" vClass="pedestrian" speed="{pedestrian_speed:.2f}" length="0.5" width="0.5" guiShape="pedestrian"/>\n')
 
+        # 写入车辆和行人
         for entry in route_entries:
-            is_ego = entry.get("is_ego", False)
-            vehicle_prefix = "egoVehicle" if is_ego else "vehicle"
-            vehicle_type = "solution_ego" if is_ego else "solution_vehicle"
-            vehicle_id = f"{vehicle_prefix}_{entry['planning_problem_id']}"
+            object_type = entry["object_type"]
+            planning_problem_id = entry["planning_problem_id"]
             edges_str = " ".join(entry["edges"])
             depart = entry["depart_time"]
-            f.write(f'    <vehicle id="{vehicle_id}" type="{vehicle_type}" depart="{depart}" departLane="free" departPos="random">\n')
-            f.write(f'        <route edges="{edges_str}"/>\n')
-            f.write("    </vehicle>\n")
+            
+            if object_type == "pedestrian":
+                person_id = f"ped_{planning_problem_id}"
+                f.write(f'    <person id="{person_id}" type="pedestrian" depart="{depart:.2f}">\n')
+                f.write(f'        <walk edges="{edges_str}" speed="{pedestrian_speed:.2f}"/>\n')
+                f.write("    </person>\n")
+            else:
+                vehicle_prefix = "egoVehicle" if object_type == "ego" else "vehicle"
+                vehicle_type = "solution_ego" if object_type == "ego" else "solution_vehicle"
+                vehicle_id = f"{vehicle_prefix}_{planning_problem_id}"
+                f.write(f'    <vehicle id="{vehicle_id}" type="{vehicle_type}" depart="{depart}" departLane="free" departPos="random">\n')
+                f.write(f'        <route edges="{edges_str}"/>\n')
+                f.write("    </vehicle>\n")
 
         f.write("</routes>\n")
 
-    print(f"  ✓ 已根据 solution 生成路由文件: {route_file_path.name}")
+    num_vehicles_written = sum(1 for e in route_entries if e["object_type"] != "pedestrian")
+    num_pedestrians_written = sum(1 for e in route_entries if e["object_type"] == "pedestrian")
+    print(f"  ✓ 已根据 solution 生成路由文件: {route_file_path.name} (车辆: {num_vehicles_written}, 行人: {num_pedestrians_written})")
     return route_file_path.name
+
+
+def _ensure_pedestrian_access_on_net(net_file_path: Path) -> None:
+    if not net_file_path.exists():
+        print(f"  警告: 找不到网络文件 {net_file_path}，无法设置行人权限。")
+        return
+
+    try:
+        tree = ET.parse(net_file_path)
+    except Exception as exc:
+        print(f"  警告: 解析网络文件失败 {net_file_path}: {exc}")
+        return
+
+    root = tree.getroot()
+    changed = False
+    for lane in root.findall(".//lane"):
+        disallow = lane.attrib.get("disallow", "")
+        disallow_tokens = disallow.split() if disallow else []
+
+        if "pedestrian" in disallow_tokens:
+            disallow_tokens = [token for token in disallow_tokens if token != "pedestrian"]
+            if disallow_tokens:
+                lane.attrib["disallow"] = " ".join(disallow_tokens)
+            else:
+                lane.attrib.pop("disallow", None)
+            changed = True
+
+    if not changed:
+        return
+
+    try:
+        import xml.dom.minidom
+
+        xml_string = ET.tostring(root, encoding="utf-8")
+        dom = xml.dom.minidom.parseString(xml_string)
+        pretty_xml = dom.toprettyxml(indent="\t", encoding="utf-8")
+        lines = [line for line in pretty_xml.decode("utf-8").split("\n") if line.strip()]
+        formatted_xml = "\n".join(lines)
+        with open(net_file_path, "w", encoding="utf-8") as f:
+            f.write(formatted_xml)
+    except Exception:
+        tree.write(net_file_path, encoding="utf-8", xml_declaration=True)
+
+    print(f"  ✓ 已更新 {net_file_path.name}，允许行人通行。")
+
+
+def _extract_pedestrian_edge_graph(
+    net_file_path: Path,
+) -> Optional[Tuple[Dict[str, Dict[str, str]], Dict[str, List[str]]]]:
+    if not net_file_path.exists():
+        print(f"  警告: 找不到网络文件 {net_file_path}，无法生成行人。")
+        return None
+
+    try:
+        tree = ET.parse(net_file_path)
+    except Exception as exc:
+        print(f"  警告: 解析网络文件失败 {net_file_path}: {exc}")
+        return None
+
+    root = tree.getroot()
+    edge_info: Dict[str, Dict[str, str]] = {}
+    edges_from_node: Dict[str, List[str]] = defaultdict(list)
+
+    for edge in root.findall("edge"):
+        if edge.attrib.get("function") == "internal":
+            continue
+        edge_id = edge.attrib.get("id")
+        if not edge_id:
+            continue
+
+        from_node = edge.attrib.get("from")
+        to_node = edge.attrib.get("to")
+        if not from_node or not to_node:
+            continue
+
+        edge_info[edge_id] = {"from": from_node, "to": to_node}
+        edges_from_node[from_node].append(edge_id)
+
+    if not edge_info:
+        print("  警告: 网络中未找到可用的边，跳过行人生成。")
+        return None
+
+    return edge_info, edges_from_node
+
+
 
 
 def _edge_sequence_from_states(state_list, lanelet_network, converter: CR2SumoMapConverter):
@@ -495,7 +616,29 @@ if __name__ == "__main__":
         repo_root = Path(__file__).resolve().parents[1]
         scenario_folder = repo_root / "interactive_scenarios" / scenario_name
         commonroad_file = scenario_folder / f"{scenario_name}.cr.xml"
+        if not commonroad_file.exists():
+            candidates = sorted(scenario_folder.glob("*.cr.xml"))
+            if len(candidates) == 1:
+                commonroad_file = candidates[0]
+            elif len(candidates) == 0:
+                raise FileNotFoundError(
+                    f"未在 {scenario_folder} 找到任何 .cr.xml 文件，请使用 --commonroad_file 指定。"
+                )
+            else:
+                names = ", ".join(str(path.name) for path in candidates)
+                raise ValueError(
+                    f"{scenario_folder} 中存在多个 .cr.xml 文件 ({names})，请使用 --commonroad_file 指定目标文件。"
+                )
         solution_file = scenario_folder / f"{scenario_name}_solution.xml"
+        if not solution_file.exists():
+            candidates = sorted(scenario_folder.glob("*_solution.xml"))
+            if len(candidates) == 1:
+                solution_file = candidates[0]
+            elif len(candidates) > 1:
+                names = ", ".join(str(path.name) for path in candidates)
+                raise ValueError(
+                    f"{scenario_folder} 中存在多个 *_solution.xml 文件 ({names})，请使用 --solution_file 指定目标文件。"
+                )
         return commonroad_file, scenario_folder, solution_file
 
     parser = argparse.ArgumentParser(
@@ -544,6 +687,42 @@ if __name__ == "__main__":
                  "Newell", "FullVelocityDifference", "SmartSK", "ACC"],
         help="跟驰模型名称（默认: Krauss）。可选: Krauss, IDM, IDMM, W99, PWagner2009, BKerner, Gipps, Linear, Newell 等"
     )
+    parser.add_argument(
+        "--num_pedestrians",
+        type=int,
+        default=2,
+        help="随机行人数量（默认 0，不生成）"
+    )
+    parser.add_argument(
+        "--pedestrian_speed",
+        type=float,
+        default=1.3,
+        help="随机行人速度（m/s，默认 1.3）"
+    )
+    parser.add_argument(
+        "--pedestrian_depart_interval",
+        type=float,
+        default=2.0,
+        help="随机行人出发间隔（秒，默认 2.0）"
+    )
+    parser.add_argument(
+        "--pedestrian_walk_min",
+        type=int,
+        default=3,
+        help="随机行人路径的最少边数（默认 3）"
+    )
+    parser.add_argument(
+        "--pedestrian_walk_max",
+        type=int,
+        default=6,
+        help="随机行人路径的最多边数（默认 6）"
+    )
+    parser.add_argument(
+        "--pedestrian_seed",
+        type=int,
+        default=None,
+        help="随机行人生成用的随机种子（默认随机）"
+    )
     args = parser.parse_args()
 
     commonroad_file = args.commonroad_file
@@ -569,5 +748,11 @@ if __name__ == "__main__":
         args.step_length,
         solution_file=solution_file,
         car_follow_model=args.car_follow_model,
+        num_random_pedestrians=args.num_pedestrians,
+        pedestrian_speed=args.pedestrian_speed,
+        pedestrian_depart_interval=args.pedestrian_depart_interval,
+        pedestrian_walk_min=args.pedestrian_walk_min,
+        pedestrian_walk_max=args.pedestrian_walk_max,
+        pedestrian_seed=args.pedestrian_seed,
     )
 

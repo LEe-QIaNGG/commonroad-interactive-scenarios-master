@@ -59,11 +59,6 @@ def generate_random_planning_problems(
     if random_seed is not None:
         np.random.seed(random_seed)
 
-    available_lanelets = scenario.lanelet_network.lanelets
-    if len(available_lanelets) < 2:
-        print("警告：可用车道数量不足，无法生成规划问题")
-        return planning_problem_set
-
     generated = 0
     attempts = 0
     max_attempts = num_problems * 10 if num_problems > 0 else 10

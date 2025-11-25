@@ -10,7 +10,7 @@ from commonroad.scenario.scenario import Tag
 path = os.path.abspath("")
 
 # specify required arguments
-name_scenario = "CHN_TST-2_1_T-440"
+name_scenario = "CHN_TST-2_1_T-300"
 
 # replace with local folder path (in this case we cloned the whole repository from https://gitlab.lrz.de/tum-cps/commonroad-scenarios/-/tree/2020a_scenarios):
 folder_scenarios = os.path.join(path, "./interactive_scenarios/")

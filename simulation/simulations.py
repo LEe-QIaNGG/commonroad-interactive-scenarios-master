@@ -16,6 +16,13 @@ import pickle
 from enum import unique, Enum
 from math import sin, cos
 from typing import Tuple, Dict, Optional, List
+from pathlib import Path
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+LOCAL_SUMOCR_DIR = REPO_ROOT / "sumocr"
+if LOCAL_SUMOCR_DIR.exists() and str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import numpy as np
 from commonroad.common.file_reader import CommonRoadFileReader

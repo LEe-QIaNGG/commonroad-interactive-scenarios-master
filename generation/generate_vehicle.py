@@ -21,11 +21,33 @@ def generate_random_position_and_orientation(scenario):
         tuple: (position, orientation) 如果成功生成，否则返回 (None, None)
     """
     lanelets = list(scenario.lanelet_network.lanelets)
-    
-    # 过滤出有有效距离信息的车道
+
+    crossing_lanelet_ids = set()
+    intersections = getattr(scenario.lanelet_network, "intersections", None)
+    if intersections:
+        for intersection in intersections:
+            crossing_entries = getattr(intersection, "crossings", None)
+            if not crossing_entries:
+                continue
+            for entry in crossing_entries:
+                lanelet_id = getattr(entry, "lanelet_id", None)
+                if lanelet_id is None:
+                    try:
+                        lanelet_id = int(entry)
+                    except (TypeError, ValueError):
+                        lanelet_id = None
+                if lanelet_id is not None:
+                    crossing_lanelet_ids.add(lanelet_id)
+
+    # 过滤出有有效距离信息的车道，并排除人行横道 lanelet
     valid_lanelets = []
     for lanelet in lanelets:
-        if hasattr(lanelet, 'distance') and len(lanelet.distance) > 0 and lanelet.distance[-1] > 0:
+        if (
+            hasattr(lanelet, "distance")
+            and len(lanelet.distance) > 0
+            and lanelet.distance[-1] > 0
+            and lanelet.lanelet_id not in crossing_lanelet_ids
+        ):
             valid_lanelets.append(lanelet)
     
     if not valid_lanelets:

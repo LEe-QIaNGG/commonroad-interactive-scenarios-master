@@ -1,5 +1,12 @@
 import copy
 from typing import Dict
+from pathlib import Path
+import sys
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+LOCAL_SUMOCR_DIR = REPO_ROOT / "sumocr"
+if LOCAL_SUMOCR_DIR.exists() and str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from IPython import display
 from commonroad.common.solution import PlanningProblemSolution, Solution, CommonRoadSolutionWriter, VehicleType, \
