@@ -466,16 +466,6 @@ class InteractiveSumoSimulationWithMotionPlanner(AbstractSumoSimulation):
                 continue
 
             self.sync_from_sumo_simulation(obstacle)
-        
-        # Sync traffic lights from SUMO to CommonRoad scenario
-        # This ensures SUMO's automatic traffic light changes are reflected in CommonRoad
-        for traffic_light in self._scenario.lanelet_network.traffic_lights:
-            try:
-                self.sync_from_sumo_simulation(traffic_light)
-            except (RuntimeError, ValueError) as e:
-                # Log error but continue with other traffic lights
-                _LOGGER.debug(f"Failed to sync traffic light {traffic_light.traffic_light_id}: {e}")
-                continue
 
     def run(
         self,

@@ -12,12 +12,12 @@ To initialize blank scenario with planning problems and trajectories (batch_plan
 
 ```bash
 python generation/initialize_scenario.py \
-    --input interactive_scenarios/CHN_TST-2_1_T-1/CHN_TST-3_1_T-1.cr.xml \
+    --input interactive_scenarios/CHN_TST-4_1_T-1/CHN_TST-4_1_T-1.cr.xml \
     --seed 31 \
-    --num-vehicle 5 \
+    --num-vehicle 1 \
     --num-ego 1 \
     --max-attempts 800 \
-    --output-dir interactive_scenarios/CHN_TST-3_1_T-31 \
+    --output-dir interactive_scenarios/CHN_TST-4_1_T-1/ \
     --overwrite
 ```
 

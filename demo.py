@@ -55,15 +55,30 @@ class SimpleMotionPlanner(TrajectoryPlannerInterface):
         :return: A trajectory for the ego vehicle
         """
         initial_state = planning_problem.initial_state
-        state_list = [copy.deepcopy(initial_state)]
+        
+        # Convert initial_state to CustomState to ensure all states have the same attributes
+        if not isinstance(initial_state, CustomState):
+            current_state = CustomState(
+                time_step=initial_state.time_step,
+                position=initial_state.position,
+                orientation=initial_state.orientation,
+                velocity=initial_state.velocity,
+                acceleration=initial_state.acceleration if initial_state.has_value('acceleration') else 0.0,
+                steering_angle=0.0,
+            )
+        else:
+            current_state = copy.deepcopy(initial_state)
+        
+        state_list = [current_state]
         
         # Simple planner: decelerate to full stop
-        current_state = copy.deepcopy(initial_state)
         a = -4.0  # deceleration
         dt = scenario.dt
         
-        for i in range(50):  # Plan for 50 time steps
-            if current_state.velocity <= 0:
+        # Ensure we plan at least 2 states (current and next) even if velocity is 0
+        min_states = 2
+        for i in range(max(50, min_states)):  # Plan for at least min_states time steps
+            if i >= min_states and current_state.velocity <= 0:
                 break
                 
             # Update position
