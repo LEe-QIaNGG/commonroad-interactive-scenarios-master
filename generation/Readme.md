@@ -56,4 +56,6 @@ To run the whole pipeline once (initialize scenario + generate SUMO configs):
     --step-length 0.1 \
     --overwrite
 
+python generation/sumo_from_graph.py \
+    --scenario_name CHN_TST-4_1_T-1 
 

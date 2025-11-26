@@ -18,6 +18,7 @@ __version__ = "0.1"
 import os
 import pickle
 import shutil
+import yaml
 from collections import defaultdict, deque
 from typing import Optional, Dict, List, Tuple
 from pathlib import Path
@@ -25,34 +26,44 @@ import random
 import sys
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-LOCAL_SUMOCR_DIR = REPO_ROOT / "sumocr"
-if LOCAL_SUMOCR_DIR.exists() and str(REPO_ROOT) not in sys.path:
+LOCAL_COMMONROAD_SUMO_DIR = REPO_ROOT / "commonroad_sumo"
+if LOCAL_COMMONROAD_SUMO_DIR.exists() and str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
+
+# 配置文件路径
+CONFIG_FILE = REPO_ROOT / "config" / "sumo_from_solution.yaml"
 
 from commonroad.common.file_reader import CommonRoadFileReader
 from commonroad.common.solution import CommonRoadSolutionReader
-from sumocr.sumo_config.default import DefaultConfig
+from commonroad_sumo.sumo_config.default import DefaultConfig
 from commonroad_sumo.cr2sumo import CR2SumoMapConverter, CR2SumoMapConverterConfig
 from commonroad_sumo.sumolib.net import Edge
 
 import xml.etree.ElementTree as ET
+
+# 导入共同工具函数
+try:
+    from generation.sumo_utils import (
+        remove_all_traffic_lights,
+        rename_converter_outputs,
+        update_sumo_config_file,
+    )
+except ImportError:
+    # 如果绝对导入失败，尝试相对导入
+    from .sumo_utils import (
+        remove_all_traffic_lights,
+        rename_converter_outputs,
+        update_sumo_config_file,
+    )
 
 
 def generate_sumo_files_from_commonroad(
     commonroad_scenario_path: str,
     output_folder: str,
     scenario_name: Optional[str] = None,
-    simulation_steps: int = 500,
-    step_length: float = 0.1,
     converter_config: Optional[CR2SumoMapConverterConfig] = None,
     solution_file: Optional[str] = None,
-    car_follow_model: str = "Krauss",
-    num_random_pedestrians: int = 0,
-    pedestrian_speed: float = 1.3,
-    pedestrian_depart_interval: float = 2.0,
-    pedestrian_walk_min: int = 3,
-    pedestrian_walk_max: int = 6,
-    pedestrian_seed: Optional[int] = None,
+    config_file: Optional[Path] = None,
     **default_config_kwargs
 ) -> str:
     """
@@ -63,19 +74,26 @@ def generate_sumo_files_from_commonroad(
     :param commonroad_scenario_path: CommonRoad场景文件路径 (.cr.xml)
     :param output_folder: 输出文件夹路径
     :param scenario_name: 场景名称（如果不提供，将从文件名提取）
-    :param simulation_steps: 仿真步数，默认500
-    :param step_length: 每步时间长度（秒），默认0.1
     :param converter_config: CR2SumoMapConverterConfig 配置对象（可选）
-    :param car_follow_model: 跟驰模型名称，可选值：Krauss, IDM, IDMM, W99, PWagner2009, BKerner, Gipps, Linear, Newell 等，默认 "Krauss"
+    :param solution_file: 解决方案文件路径 (.solution.xml)
+    :param config_file: 配置文件路径，如果提供则从此文件读取所有配置参数
     :param default_config_kwargs: DefaultConfig的其他参数
-    :param num_random_pedestrians: 从 solution 中分配为行人的数量，默认 0（不生成行人）
-    :param pedestrian_speed: 行人行走速度（m/s）
-    :param pedestrian_depart_interval: 行人出发时间间隔（秒，已废弃，保留用于兼容性）
-    :param pedestrian_walk_min: 随机游走的最短边数（已废弃，保留用于兼容性）
-    :param pedestrian_walk_max: 随机游走的最长边数（已废弃，保留用于兼容性）
-    :param pedestrian_seed: 随机种子（已废弃，保留用于兼容性）
     :return: 输出文件夹路径
     """
+    # 从 YAML 文件加载配置
+    yaml_config = load_config_from_yaml(config_file)
+    
+    # 从 YAML 配置读取所有参数
+    simulation_steps = yaml_config.get('simulation', {}).get('steps', 500)
+    step_length = yaml_config.get('simulation', {}).get('step_length', 0.1)
+    car_follow_model = yaml_config.get('vehicle', {}).get('car_follow_model', 'EIDM')
+    num_random_pedestrians = yaml_config.get('pedestrian', {}).get('num_random_pedestrians', 0)
+    pedestrian_speed = yaml_config.get('pedestrian', {}).get('speed', 1.3)
+    pedestrian_depart_interval = yaml_config.get('pedestrian', {}).get('depart_interval', 2.0)
+    pedestrian_walk_min = yaml_config.get('pedestrian', {}).get('walk_min', 3)
+    pedestrian_walk_max = yaml_config.get('pedestrian', {}).get('walk_max', 6)
+    pedestrian_seed = yaml_config.get('pedestrian', {}).get('seed')
+    
     # 确保输出文件夹存在
     output_folder = Path(output_folder)
     output_folder.mkdir(parents=True, exist_ok=True)
@@ -102,14 +120,14 @@ def generate_sumo_files_from_commonroad(
         sumo_project = converter.create_sumo_files(output_folder=output_folder)
     except ValueError as exc:
         print("  警告: 交通灯转换失败，尝试移除交通灯后重试。")
-        _remove_all_traffic_lights(scenario.lanelet_network)
+        remove_all_traffic_lights(scenario.lanelet_network)
         converter = CR2SumoMapConverter(scenario, converter_config)
         sumo_project = converter.create_sumo_files(output_folder=output_folder)
 
     original_project_name = (
         str(scenario.scenario_id) if scenario.scenario_id else scenario_name
     )
-    _rename_converter_outputs(output_folder, original_project_name, scenario_name)
+    rename_converter_outputs(output_folder, original_project_name, scenario_name)
 
     net_file_path = output_folder / f"{scenario_name}.net.xml"
     _ensure_pedestrian_access_on_net(net_file_path)
@@ -137,7 +155,7 @@ def generate_sumo_files_from_commonroad(
 
     # 更新 SUMO 配置文件
     sumo_cfg_path = output_folder / f"{scenario_name}.sumo.cfg"
-    _update_sumo_config_file(str(sumo_cfg_path), scenario_name, route_file_name, step_length)
+    update_sumo_config_file(sumo_cfg_path, scenario_name, route_file_name, step_length)
 
     # 创建DefaultConfig并保存
     conf = DefaultConfig()
@@ -170,140 +188,29 @@ def _rename_sumo_files_if_needed(output_folder: Path, scenario_name: str):
         print(f"  已复制 {rou_file.name} 为 {vehicle_rou_file.name}")
 
 
-def _update_sumo_config_file(
-    sumo_cfg_path: str,
-    scenario_name: str,
-    route_file_name: str,
-    step_length: float,
-):
-    """更新SUMO配置文件以确保引用正确的网络和路由文件，并添加必要的processing配置（包括collision设置）"""
-    tree = ET.parse(sumo_cfg_path)
-    root = tree.getroot()
+# 共同函数已移至 generation.sumo_utils 模块
 
 
-    input_element = root.find("input")
-    if input_element is None:
-        input_element = ET.SubElement(root, "input")
-
-    net_file_element = input_element.find("net-file")
-    if net_file_element is None:
-        net_file_element = ET.SubElement(input_element, "net-file")
-    net_file_element.set("value", f"{scenario_name}.net.xml")
-
-    route_files_element = input_element.find("route-files")
-    if route_files_element is None:
-        route_files_element = ET.SubElement(input_element, "route-files")
-    route_files_element.set("value", route_file_name)
-
-    time_element = root.find("time")
-    if time_element is None:
-        time_element = ET.SubElement(root, "time")
-
-    step_length_element = time_element.find("step-length")
-    if step_length_element is None:
-        step_length_element = ET.SubElement(time_element, "step-length")
-    step_length_element.set("value", str(step_length))
-
-    # 添加或更新 processing 部分，包括 collision 配置
-    processing_element = root.find("processing")
-    if processing_element is None:
-        processing_element = ET.SubElement(root, "processing")
-
-    # 设置 lateral-resolution
-    lateral_resolution = processing_element.find("lateral-resolution")
-    if lateral_resolution is None:
-        lateral_resolution = ET.SubElement(processing_element, "lateral-resolution")
-    lateral_resolution.set("value", "1.0")
-
-    # 设置 max-depart-delay
-    max_depart_delay = processing_element.find("max-depart-delay")
-    if max_depart_delay is None:
-        max_depart_delay = ET.SubElement(processing_element, "max-depart-delay")
-    max_depart_delay.set("value", "5")
-
-    # 设置 time-to-teleport
-    time_to_teleport = processing_element.find("time-to-teleport")
-    if time_to_teleport is None:
-        time_to_teleport = ET.SubElement(processing_element, "time-to-teleport")
-    time_to_teleport.set("value", "-1")
-
-    # 设置 collision.mingap-factor
-    collision_mingap = processing_element.find("collision.mingap-factor")
-    if collision_mingap is None:
-        collision_mingap = ET.SubElement(processing_element, "collision.mingap-factor")
-    collision_mingap.set("value", "1")
-
-    # 设置 collision.check-junctions
-    collision_check_junctions = processing_element.find("collision.check-junctions")
-    if collision_check_junctions is None:
-        collision_check_junctions = ET.SubElement(processing_element, "collision.check-junctions")
-    collision_check_junctions.set("value", "True")
-
-    # 设置 collision.action
-    collision_action = processing_element.find("collision.action")
-    if collision_action is None:
-        collision_action = ET.SubElement(processing_element, "collision.action")
-    collision_action.set("value", "warn")
-
-    # 添加 report 部分（如果不存在）
-    report_element = root.find("report")
-    if report_element is None:
-        report_element = ET.SubElement(root, "report")
-        verbose = ET.SubElement(report_element, "verbose")
-        verbose.set("value", "false")
-        no_step_log = ET.SubElement(report_element, "no-step-log")
-        no_step_log.set("value", "true")
-        no_warnings = ET.SubElement(report_element, "no-warnings")
-        no_warnings.set("value", "true")
-
-    # 格式化并写入 XML（使用 minidom 进行格式化）
+def load_config_from_yaml(config_path: Optional[Path] = None) -> Dict:
+    """从 YAML 文件加载配置
+    
+    :param config_path: 配置文件路径，如果为 None 则使用默认路径
+    :return: 配置字典
+    """
+    if config_path is None:
+        config_path = CONFIG_FILE
+    
+    if not config_path.exists():
+        print(f"  警告: 配置文件 {config_path} 不存在，使用默认配置")
+        return {}
+    
     try:
-        import xml.dom.minidom
-        xml_string = ET.tostring(root, encoding="utf-8")
-        dom = xml.dom.minidom.parseString(xml_string)
-        pretty_xml = dom.toprettyxml(indent="\t", encoding="utf-8")
-        # 移除 minidom 添加的额外空行
-        lines = [line for line in pretty_xml.decode("utf-8").split("\n") if line.strip()]
-        formatted_xml = "\n".join(lines)
-        with open(sumo_cfg_path, "w", encoding="utf-8") as f:
-            f.write(formatted_xml)
-    except Exception:
-        # 如果格式化失败，使用原始方式写入
-        tree.write(sumo_cfg_path, encoding="utf-8", xml_declaration=True)
-def _rename_converter_outputs(output_folder: Path, original_name: str, scenario_name: str):
-    """将转换器生成的文件统一重命名前缀"""
-    if not original_name or original_name == scenario_name:
-        return
-
-    for file_path in output_folder.iterdir():
-        if not file_path.is_file():
-            continue
-        if not file_path.name.startswith(original_name):
-            continue
-
-        suffix = file_path.name[len(original_name) :]
-        target_path = file_path.with_name(f"{scenario_name}{suffix}")
-        if target_path.exists():
-            target_path.unlink()
-        shutil.move(str(file_path), str(target_path))
-
-
-def _remove_all_traffic_lights(lanelet_network):
-    """移除场景中的所有交通灯，以避免转换时的错误"""
-    try:
-        lanelets = getattr(lanelet_network, "lanelets", [])
-        for lanelet in lanelets:
-            if getattr(lanelet, "traffic_lights", None):
-                lanelet.traffic_lights = set()
-
-        if hasattr(lanelet_network, "_traffic_lights"):
-            lanelet_network._traffic_lights = {}
-
-        cleanup_method = getattr(lanelet_network, "cleanup_traffic_lights", None)
-        if callable(cleanup_method):
-            cleanup_method()
-    except Exception as exc:
-        print(f"  警告: 移除交通灯时出现问题: {exc}")
+        with open(config_path, 'r', encoding='utf-8') as f:
+            config = yaml.safe_load(f)
+        return config if config else {}
+    except Exception as e:
+        print(f"  警告: 读取配置文件 {config_path} 失败: {e}，使用默认配置")
+        return {}
 
 
 def _generate_routes_from_solution(
@@ -608,9 +515,14 @@ def _repair_edge_sequence_for_connectivity(
     return repaired
 
 
+
+
 if __name__ == "__main__":
     import argparse
     from pathlib import Path
+
+    # 加载默认配置
+    default_config = load_config_from_yaml()
 
     def _default_paths_from_name(scenario_name: str):
         repo_root = Path(__file__).resolve().parents[1]
@@ -661,69 +573,22 @@ if __name__ == "__main__":
         help="场景名称（默认从文件名提取）"
     )
     parser.add_argument(
-        "--simulation_steps",
-        type=int,
-        default=500,
-        help="仿真步数（默认500）"
-    )
-    parser.add_argument(
-        "--step_length",
-        type=float,
-        default=0.1,
-        help="每步时间长度（秒，默认0.1）"
-    )
-    parser.add_argument(
         "--solution_file",
         type=str,
         default=None,
         help="解决方案文件路径 (.solution.xml)"
     )
     parser.add_argument(
-        "--car_follow_model",
+        "--config",
         type=str,
-        default="EIDM",
-        choices=["Krauss", "KraussOrig1", "KraussPS", "KraussAccident", "IDM", "IDMM", "IDMPlus", "IDMVanilla", 
-                 "W99", "PWagner2009", "PWagner", "BKerner", "SKraussCL", "Gipps", "Helly", "Linear", 
-                 "Newell", "FullVelocityDifference", "SmartSK", "ACC"],
-        help="跟驰模型名称（默认: Krauss）。可选: Krauss, IDM, IDMM, W99, PWagner2009, BKerner, Gipps, Linear, Newell 等"
-    )
-    parser.add_argument(
-        "--num_pedestrians",
-        type=int,
-        default=2,
-        help="随机行人数量（默认 0，不生成）"
-    )
-    parser.add_argument(
-        "--pedestrian_speed",
-        type=float,
-        default=1.3,
-        help="随机行人速度（m/s，默认 1.3）"
-    )
-    parser.add_argument(
-        "--pedestrian_depart_interval",
-        type=float,
-        default=2.0,
-        help="随机行人出发间隔（秒，默认 2.0）"
-    )
-    parser.add_argument(
-        "--pedestrian_walk_min",
-        type=int,
-        default=3,
-        help="随机行人路径的最少边数（默认 3）"
-    )
-    parser.add_argument(
-        "--pedestrian_walk_max",
-        type=int,
-        default=6,
-        help="随机行人路径的最多边数（默认 6）"
-    )
-    parser.add_argument(
-        "--pedestrian_seed",
-        type=int,
         default=None,
-        help="随机行人生成用的随机种子（默认随机）"
+        help=f"配置文件路径（默认: {CONFIG_FILE}）"
     )
+    
     args = parser.parse_args()
+
+    # 加载配置文件
+    config_file = Path(args.config) if args.config else None
 
     commonroad_file = args.commonroad_file
     output_folder = args.output_folder
@@ -740,19 +605,12 @@ if __name__ == "__main__":
     if not output_folder:
         raise ValueError("必须提供 --output_folder，或通过 --scenario_name 推断。")
 
+    # 所有参数都从配置文件读取
     generate_sumo_files_from_commonroad(
         commonroad_file,
         output_folder,
         args.scenario_name,
-        args.simulation_steps,
-        args.step_length,
         solution_file=solution_file,
-        car_follow_model=args.car_follow_model,
-        num_random_pedestrians=args.num_pedestrians,
-        pedestrian_speed=args.pedestrian_speed,
-        pedestrian_depart_interval=args.pedestrian_depart_interval,
-        pedestrian_walk_min=args.pedestrian_walk_min,
-        pedestrian_walk_max=args.pedestrian_walk_max,
-        pedestrian_seed=args.pedestrian_seed,
+        config_file=config_file,
     )
 

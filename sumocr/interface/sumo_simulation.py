@@ -476,7 +476,10 @@ class SumoSimulation:
 
         # get updated obstacles from sumo
         self._current_time_step += 1
-        self._simulation_interface.simulate_step()
+        # Sync traffic lights from SUMO at CR time step level
+        # This reads the current state from SUMO after all sub-steps have completed
+        # This ensures we capture the state at the CR time scale, not every SUMO sub-step
+        self._simulation_interface.simulate_step(time_step=self._current_time_step)
         new_vehicle_ids, new_ped_ids = self._fetch_new_ids_from_sumo()
         self._fetch_sumo_vehicles(self.current_time_step, new_vehicle_ids)
         self._fetch_sumo_pedestrians(self.current_time_step, new_ped_ids)

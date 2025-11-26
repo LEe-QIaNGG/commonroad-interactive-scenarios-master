@@ -30,10 +30,10 @@ class SumoSimulationInterface:
             simulation_backend, id_mapper, scenario
         )
 
-    def simulate_step(self):
+    def simulate_step(self, time_step: int = None):
         self._vehicle_interface.simulate_step()
         self._pedestrian_interface.simulate_step()
-        self._traffic_light_interface.simulate_step()
+        self._traffic_light_interface.simulate_step(time_step=time_step)
 
     @property
     def vehicles(self):

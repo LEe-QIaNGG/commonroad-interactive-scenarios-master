@@ -1,0 +1,24 @@
+# SUMO 配置文件生成参数（基于 solution 的路由生成）
+# 用于 sumo_from_solution.py
+
+# 仿真参数
+simulation:
+  steps: 500          # 仿真步数
+  step_length: 0.1    # 每步时间长度（秒）
+
+# 车辆参数
+vehicle:
+  car_follow_model: "EIDM"  # 跟驰模型名称
+  # 可选值: Krauss, KraussOrig1, KraussPS, KraussAccident, IDM, IDMM, IDMPlus, 
+  #         IDMVanilla, W99, PWagner2009, PWagner, BKerner, SKraussCL, Gipps, 
+  #         Helly, Linear, Newell, FullVelocityDifference, SmartSK, ACC
+
+# 行人参数
+pedestrian:
+  num_random_pedestrians: 2      # 从 solution 中分配为行人的数量（默认 0，不生成）
+  speed: 1.3                      # 行人行走速度（m/s）
+  depart_interval: 2.0            # 行人出发时间间隔（秒，已废弃，保留用于兼容性）
+  walk_min: 3                     # 随机行人路径的最少边数（已废弃，保留用于兼容性）
+  walk_max: 6                     # 随机行人路径的最多边数（已废弃，保留用于兼容性）
+  seed: null                      # 随机种子（已废弃，保留用于兼容性）
+

@@ -147,8 +147,8 @@ def create_video(
             rnd.draw_list(dynamic_obstacles_ego, draw_params=draw_params)
 
         draw_params = MPDrawParams()
-        draw_params.time_begin = 0
-        draw_params.time_end = 0
+        draw_params.time_begin = frame
+        draw_params.time_end = frame
         scenario.lanelet_network.draw(renderer=rnd, draw_params=draw_params)
 
         rnd.plot_limits = dict_plot_limits[frame]

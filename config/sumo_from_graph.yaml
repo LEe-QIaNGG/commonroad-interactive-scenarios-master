@@ -1,0 +1,33 @@
+# SUMO 配置文件生成参数（基于图的路由生成）
+# 用于 sumo_from_graph.py
+
+# 仿真参数
+simulation:
+  steps: 500          # 仿真步数
+  step_length: 0.1    # 每步时间长度（秒）
+
+# 路由生成参数
+route_generation:
+  num_routes: 20      # 要生成的路径数量
+  min_edges: 4        # 每条路径的最少 edge 数量
+  max_edges: 10       # 每条路径的最多 edge 数量
+
+# 车辆参数
+vehicle:
+  car_follow_model: "Krauss"  # 跟驰模型名称
+  # 可选值: Krauss, KraussOrig1, KraussPS, KraussAccident, IDM, IDMM, IDMPlus, 
+  #         IDMVanilla, W99, PWagner2009, PWagner, BKerner, SKraussCL, Gipps, 
+  #         Helly, Linear, Newell, FullVelocityDifference, SmartSK, ACC, EIDM
+
+# 车辆出发时间参数
+departure:
+  start: 0.0          # 第一个车辆的出发时间（秒）
+  interval: 1.5       # 车辆出发时间间隔（秒）
+
+# 随机种子（用于可重复性）
+random_seed: null     # null 表示使用随机种子，也可以设置为整数
+
+# 其他选项
+options:
+  generate_cfg: true  # 是否生成 sumo.cfg 配置文件
+
